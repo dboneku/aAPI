@@ -9,12 +9,16 @@
 <body>
   <h1>AztecEncoder</h1>
   
-  <div class="controls">
+  <div class="controls" id="dropzone">
     <input id="file" type="file" />
+    <span id="fileSummary" style="color: #94a3b8;"></span>
     <button id="preview">Preview</button>
     <button id="generate">Generate PDF</button>
+    <button id="scan" onclick="window.location.href='/scan'" style="background: #10b981;">Scan Barcodes</button>
   </div>
-  
+
+  <div id="warn" style="display:none; background: #d97706; padding: 12px; border-radius: 8px; margin-bottom: 1.5rem; color: white; max-width: 800px;"></div>
+
   <div id="out"></div>
   <div id="symbols"></div>
   
@@ -22,77 +26,95 @@
     const f = document.getElementById('file');
     const out = document.getElementById('out');
     const symbolsDiv = document.getElementById('symbols');
-    
+    const fileSummary = document.getElementById('fileSummary');
+    const warnDiv = document.getElementById('warn');
+    const dropzone = document.getElementById('dropzone');
+    const codecNames = { 0x00: 'RAW', 0x01: 'ZLIB', 0x02: 'BROTLI' };
+
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.style.background = 'rgba(59, 130, 246, 0.2)';
+      dropzone.style.borderColor = '#3b82f6';
+    });
+    dropzone.addEventListener('dragleave', () => {
+      dropzone.style.background = 'var(--panel)';
+      dropzone.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+    });
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.style.background = 'var(--panel)';
+      dropzone.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+      if (e.dataTransfer.files[0]) {
+        f.files = e.dataTransfer.files;
+        updateFileSummary();
+      }
+    });
+
+    f.addEventListener('change', updateFileSummary);
+    function updateFileSummary() {
+      fileSummary.textContent = f.files[0] ? f.files[0].name + ' (' + (f.files[0].size / 1024).toFixed(1) + ' KB)' : '';
+    }
+
     document.getElementById('preview').onclick = async ()=>{
       if(!f.files[0]) return alert('Choose a file first');
       out.textContent = 'Processing preview...';
       symbolsDiv.innerHTML = '';
+      warnDiv.style.display = 'none';
       try {
         const fd = new FormData(); fd.append('file', f.files[0]);
-        console.log('Sending preview request for:', f.files[0].name);
         const r = await fetch('/preview',{method:'POST', body:fd});
         if (!r.ok) {
-          const errorText = await r.text();
-          console.error('Server returned error:', r.status, errorText);
-          out.textContent = `Error ${r.status}: ${errorText}`;
+          out.textContent = 'Error: ' + (await r.text());
           return;
         }
-        const j = await r.json(); 
-        console.log('Preview result:', j);
-        out.textContent = `Symbol Count: ${j.symbolCount} | CompID: ${j.meta.compId}`;
-        
+        const j = await r.json();
+        const cols = Math.ceil(Math.sqrt(j.meta.total));
+        const rows = Math.ceil(j.meta.total / cols);
+        const codec = codecNames[j.meta.compId] || 'UNKNOWN';
+        out.textContent = 'Symbols: ' + j.meta.total + ' (' + cols + '\u00d7' + rows + ' grid) | Codec: ' + codec + ' | Compression: ' + j.meta.compressionRatio;
+        if (j.meta.warn) {
+          warnDiv.textContent = j.meta.warn;
+          warnDiv.style.display = 'block';
+        }
         if (j.symbols) {
           j.symbols.forEach(s => {
             const card = document.createElement('div');
             card.className = 'barcode-card';
-            
             const img = document.createElement('img');
             img.src = 'data:image/png;base64,' + s.data;
-            
             const label = document.createElement('span');
-            label.textContent = `Symbol #${s.index + 1}`;
-            
+            label.textContent = 'Symbol #' + (s.index + 1);
             card.appendChild(img);
             card.appendChild(label);
             symbolsDiv.appendChild(card);
           });
         }
       } catch (err) {
-        console.error('Fetch error:', err);
-        out.textContent = 'Fetch error: ' + err.message;
-        alert('Error: ' + err.message);
+        out.textContent = 'Error: ' + err.message;
       }
     };
-    
+
     document.getElementById('generate').onclick = async ()=>{
       if(!f.files[0]) return alert('Choose a file first');
-      out.innerHTML = 'Generating PDF...';
+      out.textContent = 'Generating PDF...';
       try {
         const fd = new FormData(); fd.append('file', f.files[0]);
-        console.log('Sending encode request for:', f.files[0].name);
         const r = await fetch('/encode',{method:'POST', body:fd});
         if (!r.ok) {
-          const errorText = await r.text();
-          console.error('Server returned error:', r.status, errorText);
-          out.textContent = `Error ${r.status}: ${errorText}`;
+          out.textContent = 'Error: ' + (await r.text());
           return;
         }
         const blob = await r.blob();
-        console.log('Received blob, size:', blob.size);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         a.download = 'aztec_output.pdf';
-        
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        
-        out.innerHTML = `✅ PDF generated successfully. <br>The file should start downloading automatically. <br><a href="${url}" download="aztec_output.pdf">Click here to manually download</a> if it didn't start. <br><strong>Also saved to project root as aztec_output.pdf</strong>`;
+        out.textContent = 'PDF generated and downloaded successfully!';
       } catch (err) {
-        console.error('Fetch error:', err);
-        out.textContent = 'Fetch error: ' + err.message;
-        alert('Error: ' + err.message);
+        out.textContent = 'Error: ' + err.message;
       }
     };
   </script>

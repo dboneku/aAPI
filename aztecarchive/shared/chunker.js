@@ -4,7 +4,8 @@ const MAX_PAYLOAD = 1907; // per design (1907 bytes payload per symbol)
 function chunkBuffer(buf, origTag, encodedTag, compId) {
   const chunks = [];
   const total = Math.ceil(buf.length / MAX_PAYLOAD);
-  if (total > 36) throw new Error('Exceeds max 36 symbols');
+  const warn = total > 36 ? `Warning: File requires ${total} symbols (exceeds recommended max of 36). Print size will be large (~${Math.ceil(Math.sqrt(total))}×${Math.ceil(total / Math.ceil(Math.sqrt(total)))} grid).` : null;
+
   for (let i = 0; i < total; i++) {
     const start = i * MAX_PAYLOAD;
     const slice = buf.slice(start, start + MAX_PAYLOAD);
@@ -18,7 +19,7 @@ function chunkBuffer(buf, origTag, encodedTag, compId) {
     header.writeUInt16BE(crc & 0xFFFF, 5);
     chunks.push(Buffer.concat([header, slice]));
   }
-  return chunks;
+  return { chunks, warn };
 }
 
 module.exports = { chunkBuffer };

@@ -1,22 +1,365 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"><title>Aztec Scan</title></head>
-<body>
-  <h1>Aztec Scanner (web)</h1>
-  <video id="video" autoplay playsinline></video>
-  <pre id="status"></pre>
-  <script src="https://unpkg.com/@zxing/browser@0.0.9/umd/index.min.js"></script>
-  <script>
-    const status = document.getElementById('status');
-    const codeReader = new ZXing.BrowserBarcodeReader();
-    async function start(){
-      const videoInputDevices = await codeReader.listVideoInputDevices();
-      const deviceId = videoInputDevices[0]?.deviceId;
-      codeReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
-        if(result){ status.textContent = 'Decoded: ' + result.getText().slice(0,50); }
-      });
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AztecArchive Scanner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --primary: #3b82f6;
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --text: #f1f5f9;
     }
-    start().catch(e=>status.textContent = e.message);
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    h1 { font-size: 2rem; margin: 0 0 1rem 0; }
+    #video {
+      width: 100%;
+      max-width: 500px;
+      border-radius: 12px;
+      background: #000;
+      margin: 1rem 0;
+    }
+    #status {
+      background: var(--panel);
+      padding: 16px;
+      border-radius: 12px;
+      font-family: monospace;
+      font-size: 14px;
+      margin: 1rem 0;
+      width: 100%;
+      max-width: 500px;
+      min-height: 100px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    #progress {
+      background: var(--panel);
+      padding: 16px;
+      border-radius: 12px;
+      margin: 1rem 0;
+      width: 100%;
+      max-width: 500px;
+      text-align: center;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      margin: 8px 0;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--primary);
+      width: 0%;
+      transition: width 0.2s ease;
+    }
+    button {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      margin: 8px;
+    }
+    button:hover { filter: brightness(1.1); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #result {
+      background: var(--panel);
+      padding: 16px;
+      border-radius: 12px;
+      margin: 1rem 0;
+      width: 100%;
+      max-width: 500px;
+      display: none;
+    }
+    #result.show { display: block; }
+    #resultImage { max-width: 100%; border-radius: 8px; margin: 12px 0; }
+    pre { background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; overflow: auto; max-height: 300px; }
+  </style>
+</head>
+<body>
+  <h1>AztecArchive Scanner</h1>
+
+  <div id="progress">
+    <div>Captured: <span id="capturedCount">0</span> / <span id="totalCount">?</span> symbols</div>
+    <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <div id="indices" style="font-size: 12px; color: #94a3b8;"></div>
+  </div>
+
+  <video id="video" autoplay playsinline></video>
+
+  <div>
+    <button id="startBtn" onclick="startScanning()">Start Camera</button>
+    <button id="stopBtn" onclick="stopScanning()" disabled>Stop Camera</button>
+    <button id="uploadBtn" onclick="document.getElementById('imageUpload').click()">Upload Barcode Image</button>
+    <input id="imageUpload" type="file" accept="image/*" style="display:none;">
+  </div>
+
+  <div id="status">Ready. Open your camera or upload a barcode grid image.</div>
+
+  <div id="result">
+    <h2>Decode Successful!</h2>
+    <div>File: <strong id="resultFilename">?</strong></div>
+    <div>Size: <span id="resultSize">?</span> bytes</div>
+    <div id="resultImage"></div>
+    <div id="resultText"></div>
+    <button onclick="downloadResult()">Download File</button>
+    <button onclick="resetScanner()">Scan Another</button>
+  </div>
+
+  <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
+  <script>
+    let codeReader;
+    let chunks = {};
+    let totalSymbols = null;
+    let decodedFile = null;
+    let scannerReady = false;
+
+    // Wait for ZXing to load
+    async function waitForZXing() {
+      for (let i = 0; i < 50; i++) {
+        if (typeof ZXing !== 'undefined') {
+          scannerReady = true;
+          return;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      throw new Error('ZXing library failed to load');
+    }
+    waitForZXing().catch(e => log('Warning: ' + e.message));
+
+    function crc16(buf) {
+      let crc = 0xFFFF;
+      for (let i = 0; i < buf.length; i++) {
+        crc ^= (buf[i] << 8);
+        for (let j = 0; j < 8; j++) {
+          if ((crc & 0x8000) !== 0) crc = ((crc << 1) ^ 0x1021) & 0xFFFF;
+          else crc = (crc << 1) & 0xFFFF;
+        }
+      }
+      return crc & 0xFFFF;
+    }
+
+    function updateProgress() {
+      const captured = Object.keys(chunks).length;
+      document.getElementById('capturedCount').textContent = captured;
+      const total = totalSymbols || '?';
+      document.getElementById('totalCount').textContent = total;
+      if (totalSymbols) {
+        const pct = (captured / totalSymbols) * 100;
+        document.getElementById('progressFill').style.width = pct + '%';
+      }
+      const indices = Object.keys(chunks).sort((a, b) => parseInt(a) - parseInt(b)).join(', ');
+      document.getElementById('indices').textContent = 'Indices: ' + (indices || 'none');
+    }
+
+    function processRawChunk(rawBytes) {
+      try {
+        if (rawBytes.length < 7) throw new Error('Chunk too short');
+        const compId = rawBytes[2];
+        const total = rawBytes[3];
+        const index = rawBytes[4];
+        const storedCrc = (rawBytes[5] << 8) | rawBytes[6];
+        const payload = rawBytes.slice(7);
+        const computedCrc = crc16(payload);
+        if (storedCrc !== computedCrc) {
+          console.warn('CRC mismatch for symbol ' + index);
+          return null;
+        }
+        if (!chunks[index]) {
+          chunks[index] = rawBytes;
+          if (!totalSymbols) {
+            totalSymbols = total;
+            document.getElementById('totalCount').textContent = total;
+          }
+          updateProgress();
+          if (Object.keys(chunks).length === totalSymbols) {
+            log('All symbols captured! Decoding...');
+            decodeAll();
+          }
+        }
+        return true;
+      } catch (e) {
+        console.error('Chunk error:', e.message);
+        return null;
+      }
+    }
+
+    function log(msg) {
+      const status = document.getElementById('status');
+      status.textContent += (status.textContent ? '\n' : '') + msg;
+      status.scrollTop = status.scrollHeight;
+    }
+
+    async function startScanning() {
+      try {
+        if (!scannerReady) {
+          log('ZXing library loading... please wait');
+          await waitForZXing();
+        }
+        codeReader = new ZXing.BrowserMultiFormatReader();
+        const videoInputDevices = await codeReader.listVideoInputDevices();
+        if (!videoInputDevices.length) throw new Error('No camera found');
+        const deviceId = videoInputDevices[0].deviceId;
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = false;
+        log('Camera started. Hold up barcode grid...');
+        codeReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
+          if (result) {
+            try {
+              const rawBytes = result.getRawBytes();
+              const buf = new Uint8Array(rawBytes);
+              const index = buf[4];
+              if (typeof index === 'number' && !isNaN(index) && !chunks[index]) {
+                log('Symbol #' + (index + 1) + ' detected');
+                processRawChunk(buf);
+              }
+            } catch (e) {
+              log('Error: ' + e.message);
+            }
+          }
+        });
+      } catch (e) {
+        log('Camera error: ' + e.message);
+      }
+    }
+
+    function stopScanning() {
+      if (codeReader) codeReader.reset();
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+      log('Camera stopped.');
+    }
+
+    document.getElementById('imageUpload').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      log('Processing image...');
+      const img = new Image();
+      img.onload = async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        try {
+          if (!scannerReady) {
+            log('ZXing library loading... please wait');
+            await waitForZXing();
+          }
+          const reader = new ZXing.BrowserMultiFormatReader();
+          const result = await reader.decodeFromCanvas(canvas);
+          if (result) {
+            const rawBytes = result.getRawBytes();
+            const buf = new Uint8Array(rawBytes);
+            const index = buf[4];
+            if (typeof index === 'number' && !isNaN(index)) {
+              log('Symbol #' + (index + 1) + ' detected from image');
+              processRawChunk(buf);
+            }
+          }
+        } catch (e) {
+          log('No barcode found in image');
+        }
+      };
+      img.src = URL.createObjectURL(file);
+    });
+
+    async function decodeAll() {
+      try {
+        stopScanning();
+        const chunkArray = Object.keys(chunks).sort((a, b) => parseInt(a) - parseInt(b)).map(i => chunks[i]);
+        const b64Chunks = chunkArray.map(buf => {
+          let b64 = '';
+          for (let i = 0; i < buf.length; i++) {
+            b64 += String.fromCharCode(buf[i]);
+          }
+          return btoa(b64);
+        });
+        log('Sending to server for decode...');
+        const r = await fetch('/decode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chunks: b64Chunks })
+        });
+        if (!r.ok) {
+          log('Decode error: ' + (await r.text()));
+          return;
+        }
+        const result = await r.json();
+        decodedFile = {
+          data: result.data,
+          ext: result.ext,
+          mimeType: result.mimeType
+        };
+        log('Decode successful! File type: .' + result.ext);
+        displayResult(result);
+      } catch (e) {
+        log('Decode failed: ' + e.message);
+      }
+    }
+
+    function displayResult(result) {
+      document.getElementById('resultFilename').textContent = 'decoded.' + result.ext;
+      document.getElementById('resultSize').textContent = atob(result.data).length;
+      const imgDiv = document.getElementById('resultImage');
+      const textDiv = document.getElementById('resultText');
+      imgDiv.innerHTML = '';
+      textDiv.innerHTML = '';
+      if (result.mimeType.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.id = 'resultImage';
+        img.src = 'data:' + result.mimeType + ';base64,' + result.data;
+        imgDiv.appendChild(img);
+      } else if (result.mimeType === 'text/plain' || result.mimeType === 'text/markdown') {
+        const text = atob(result.data);
+        const pre = document.createElement('pre');
+        pre.textContent = text;
+        textDiv.appendChild(pre);
+      }
+      document.getElementById('result').classList.add('show');
+    }
+
+    function downloadResult() {
+      const binaryString = atob(decodedFile.data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes]);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'decoded.' + decodedFile.ext;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    function resetScanner() {
+      chunks = {};
+      totalSymbols = null;
+      decodedFile = null;
+      document.getElementById('result').classList.remove('show');
+      document.getElementById('status').textContent = 'Ready. Open your camera or upload a barcode grid image.';
+      updateProgress();
+      document.getElementById('startBtn').disabled = false;
+    }
   </script>
 </body>
 </html>

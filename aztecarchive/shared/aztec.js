@@ -19,7 +19,8 @@ async function renderAztecPNG(dataBuffer, options = {}) {
     text,
     scale: options.scale || 4,
     includetext: false,
-    padding: 0
+    padding: 0,
+    binarytext: true
   });
   return png;
 }
