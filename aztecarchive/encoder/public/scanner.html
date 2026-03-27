@@ -200,6 +200,28 @@
       }
     }
 
+    /**
+     * Extract the raw chunk bytes from a ZXing result object.
+     *
+     * Barcodes are generated with base64-encoded content (pure ASCII) so that
+     * getText() returns it reliably in all browsers. getRawBytes() in ZXing JS
+     * returns the barcode's internal codeword bits, not the payload — useless here.
+     */
+    function extractBytes(result) {
+      try {
+        const text = result.getText();
+        if (!text) return null;
+        // atob decodes the base64 string back to binary
+        const binaryStr = atob(text.trim());
+        if (binaryStr.length < 7) return null;
+        const buf = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) buf[i] = binaryStr.charCodeAt(i);
+        return buf;
+      } catch (e) {
+        return null;
+      }
+    }
+
     function log(msg) {
       const status = document.getElementById('status');
       status.textContent += (status.textContent ? '\n' : '') + msg;
@@ -222,8 +244,8 @@
         codeReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
           if (result) {
             try {
-              const rawBytes = result.getRawBytes();
-              const buf = new Uint8Array(rawBytes);
+              const buf = extractBytes(result);
+              if (!buf) return;
               const index = buf[4];
               if (typeof index === 'number' && !isNaN(index) && !chunks[index]) {
                 log('Symbol #' + (index + 1) + ' detected');
@@ -265,12 +287,13 @@
           const reader = new ZXing.BrowserMultiFormatReader();
           const result = await reader.decodeFromCanvas(canvas);
           if (result) {
-            const rawBytes = result.getRawBytes();
-            const buf = new Uint8Array(rawBytes);
-            const index = buf[4];
-            if (typeof index === 'number' && !isNaN(index)) {
-              log('Symbol #' + (index + 1) + ' detected from image');
-              processRawChunk(buf);
+            const buf = extractBytes(result);
+            if (buf) {
+              const index = buf[4];
+              if (typeof index === 'number' && !isNaN(index)) {
+                log('Symbol #' + (index + 1) + ' detected from image');
+                processRawChunk(buf);
+              }
             }
           }
         } catch (e) {
@@ -322,10 +345,22 @@
       imgDiv.innerHTML = '';
       textDiv.innerHTML = '';
       if (result.mimeType.startsWith('image/')) {
-        const img = document.createElement('img');
-        img.id = 'resultImage';
-        img.src = 'data:' + result.mimeType + ';base64,' + result.data;
-        imgDiv.appendChild(img);
+        if (result.mimeType === 'image/svg+xml') {
+          // Render SVG via blob URL (safe: avoids inline script injection)
+          const bytes = Uint8Array.from(atob(result.data), c => c.charCodeAt(0));
+          const blob = new Blob([bytes], { type: 'image/svg+xml' });
+          const url = URL.createObjectURL(blob);
+          const img = document.createElement('img');
+          img.id = 'resultImage';
+          img.src = url;
+          img.style.maxWidth = '100%';
+          imgDiv.appendChild(img);
+        } else {
+          const img = document.createElement('img');
+          img.id = 'resultImage';
+          img.src = 'data:' + result.mimeType + ';base64,' + result.data;
+          imgDiv.appendChild(img);
+        }
       } else if (result.mimeType === 'text/plain' || result.mimeType === 'text/markdown') {
         const text = atob(result.data);
         const pre = document.createElement('pre');

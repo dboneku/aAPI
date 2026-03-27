@@ -19,6 +19,31 @@
 
   <div id="warn" style="display:none; background: #d97706; padding: 12px; border-radius: 8px; margin-bottom: 1.5rem; color: white; max-width: 800px;"></div>
 
+  <!-- Loading state -->
+  <div id="loading" style="display:none; background: var(--panel); padding: 16px 24px; border-radius: 12px; margin-bottom: 1.5rem; max-width: 800px; width: 100%; text-align: center; color: #94a3b8; font-size: 0.9rem; border: 1px solid rgba(255,255,255,0.06);">
+    <span id="loadingLabel">Analyzing file…</span>
+  </div>
+
+  <!-- Optimizer analysis panel (shown after preview) -->
+  <div id="analysis" style="display:none; background: var(--panel); border-radius: 12px; margin-bottom: 1.5rem; max-width: 800px; width: 100%; overflow: hidden; border: 1px solid rgba(255,255,255,0.08);">
+    <div id="analysisLabel" style="padding: 12px 16px; font-weight: 600; font-size: 0.875rem; border-bottom: 1px solid rgba(255,255,255,0.06);"></div>
+    <div id="analysisStrategies" style="padding: 12px 16px;"></div>
+    <div id="diagramHint" style="display:none; padding: 10px 16px; background: rgba(217,119,6,0.12); color: #fbbf24; font-size: 0.85rem; border-top: 1px solid rgba(217,119,6,0.25);">
+      💡 This looks like a diagram. If you have an SVG version, it will encode significantly smaller.
+    </div>
+    <div style="padding: 12px 16px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+      <label style="font-size: 0.85rem; color: #94a3b8;">Override codec:</label>
+      <select id="codecOverride" style="background: rgba(255,255,255,0.08); color: var(--text); border: 1px solid rgba(255,255,255,0.12); padding: 5px 10px; border-radius: 6px; font-size: 0.85rem;">
+        <option value="">Auto (recommended)</option>
+        <option value="0">RAW — no compression</option>
+        <option value="1">ZLIB — deflate</option>
+        <option value="2">DICT_ZLIB — dictionary + deflate</option>
+        <option value="3">VECTOR — minified SVG + deflate</option>
+      </select>
+      <span id="overrideWarn" style="color: #f59e0b; font-size: 0.8rem;"></span>
+    </div>
+  </div>
+
   <div id="out"></div>
   <div id="symbols"></div>
   
@@ -29,7 +54,11 @@
     const fileSummary = document.getElementById('fileSummary');
     const warnDiv = document.getElementById('warn');
     const dropzone = document.getElementById('dropzone');
-    const codecNames = { 0x00: 'RAW', 0x01: 'ZLIB', 0x02: 'BROTLI' };
+    const analysisDiv = document.getElementById('analysis');
+    const loadingDiv = document.getElementById('loading');
+    const loadingLabel = document.getElementById('loadingLabel');
+    const codecNames = { 0: 'RAW', 1: 'ZLIB', 2: 'DICT_ZLIB', 3: 'VECTOR' };
+    let lastStrategies = null;
 
     dropzone.addEventListener('dragover', (e) => {
       e.preventDefault();
@@ -55,27 +84,83 @@
       fileSummary.textContent = f.files[0] ? f.files[0].name + ' (' + (f.files[0].size / 1024).toFixed(1) + ' KB)' : '';
     }
 
-    document.getElementById('preview').onclick = async ()=>{
-      if(!f.files[0]) return alert('Choose a file first');
-      out.textContent = 'Processing preview...';
+    function setLoading(msg) {
+      loadingLabel.textContent = msg || 'Analyzing file\u2026';
+      loadingDiv.style.display = 'block';
+      analysisDiv.style.display = 'none';
       symbolsDiv.innerHTML = '';
+      out.textContent = '';
       warnDiv.style.display = 'none';
-      try {
-        const fd = new FormData(); fd.append('file', f.files[0]);
-        const r = await fetch('/preview',{method:'POST', body:fd});
-        if (!r.ok) {
-          out.textContent = 'Error: ' + (await r.text());
-          return;
+    }
+    function clearLoading() { loadingDiv.style.display = 'none'; }
+
+    function renderAnalysis(opt) {
+      if (!opt) return;
+      document.getElementById('analysisLabel').textContent = opt.label || '';
+      const strategiesEl = document.getElementById('analysisStrategies');
+      strategiesEl.innerHTML = '';
+      if (opt.strategies && opt.strategies.length > 0) {
+        if (opt.strategies.length > 1) {
+          const hdr = document.createElement('div');
+          hdr.style.cssText = 'font-size:0.8rem;color:#64748b;margin-bottom:8px;';
+          hdr.textContent = 'Analyzed ' + opt.strategies.length + ' encoding strategies:';
+          strategiesEl.appendChild(hdr);
         }
+        opt.strategies.forEach(s => {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;justify-content:space-between;padding:5px 0;font-size:0.85rem;border-bottom:1px solid rgba(255,255,255,0.04);';
+          const kb = (s.compressedSize / 1024).toFixed(1);
+          const sym = s.symbols === 1 ? '1 symbol' : s.symbols + ' symbols';
+          row.innerHTML = '<span style="color:' + (s.selected ? '#60a5fa' : '#64748b') + '">' + (s.selected ? '\u2190 ' : '') + s.name + '</span>'
+            + '<span style="color:' + (s.selected ? '#f1f5f9' : '#64748b') + '">' + kb + ' KB \u2192 ' + sym + (s.selected ? ' \u2713' : '') + '</span>';
+          strategiesEl.appendChild(row);
+        });
+      }
+      document.getElementById('diagramHint').style.display = opt.isDiagramHint ? 'block' : 'none';
+      lastStrategies = opt.strategies;
+      updateOverrideWarn();
+      analysisDiv.style.display = 'block';
+    }
+
+    function getOverride() {
+      const v = document.getElementById('codecOverride').value;
+      return v === '' ? undefined : parseInt(v);
+    }
+
+    function updateOverrideWarn() {
+      const span = document.getElementById('overrideWarn');
+      const override = getOverride();
+      if (override === undefined || !lastStrategies) { span.textContent = ''; return; }
+      const auto = lastStrategies.find(s => s.selected);
+      const chosen = lastStrategies.find(s => s.name.startsWith(codecNames[override] || '____'));
+      if (auto && chosen && !chosen.selected) {
+        span.textContent = '\u26a0 Auto: ' + auto.symbols + ' symbol' + (auto.symbols !== 1 ? 's' : '') + ' \u2192 Override: ' + chosen.symbols + ' symbol' + (chosen.symbols !== 1 ? 's' : '');
+      } else {
+        span.textContent = '';
+      }
+    }
+    document.getElementById('codecOverride').addEventListener('change', updateOverrideWarn);
+
+    document.getElementById('preview').onclick = async () => {
+      if (!f.files[0]) return alert('Choose a file first');
+      setLoading('Analyzing file\u2026');
+      const ocrTimer = setTimeout(() => { loadingLabel.textContent = 'Extracting text via OCR\u2026 (this may take a few seconds)'; }, 1500);
+      try {
+        const fd = new FormData();
+        fd.append('file', f.files[0]);
+        const override = getOverride();
+        if (override !== undefined) fd.append('overrideCodec', override.toString());
+        const r = await fetch('/preview', { method: 'POST', body: fd });
+        clearTimeout(ocrTimer);
+        clearLoading();
+        if (!r.ok) { out.textContent = 'Error: ' + (await r.text()); return; }
         const j = await r.json();
         const cols = Math.ceil(Math.sqrt(j.meta.total));
         const rows = Math.ceil(j.meta.total / cols);
         const codec = codecNames[j.meta.compId] || 'UNKNOWN';
         out.textContent = 'Symbols: ' + j.meta.total + ' (' + cols + '\u00d7' + rows + ' grid) | Codec: ' + codec + ' | Compression: ' + j.meta.compressionRatio;
-        if (j.meta.warn) {
-          warnDiv.textContent = j.meta.warn;
-          warnDiv.style.display = 'block';
-        }
+        if (j.meta.warn) { warnDiv.textContent = j.meta.warn; warnDiv.style.display = 'block'; }
+        renderAnalysis(j.optimizer);
         if (j.symbols) {
           j.symbols.forEach(s => {
             const card = document.createElement('div');
@@ -90,30 +175,31 @@
           });
         }
       } catch (err) {
+        clearTimeout(ocrTimer);
+        clearLoading();
         out.textContent = 'Error: ' + err.message;
       }
     };
 
-    document.getElementById('generate').onclick = async ()=>{
-      if(!f.files[0]) return alert('Choose a file first');
-      out.textContent = 'Generating PDF...';
+    document.getElementById('generate').onclick = async () => {
+      if (!f.files[0]) return alert('Choose a file first');
+      setLoading('Encoding file\u2026');
       try {
-        const fd = new FormData(); fd.append('file', f.files[0]);
-        const r = await fetch('/encode',{method:'POST', body:fd});
-        if (!r.ok) {
-          out.textContent = 'Error: ' + (await r.text());
-          return;
-        }
+        const fd = new FormData();
+        fd.append('file', f.files[0]);
+        const override = getOverride();
+        if (override !== undefined) fd.append('overrideCodec', override.toString());
+        const r = await fetch('/encode', { method: 'POST', body: fd });
+        clearLoading();
+        if (!r.ok) { out.textContent = 'Error: ' + (await r.text()); return; }
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = url;
-        a.download = 'aztec_output.pdf';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        out.textContent = 'PDF generated and downloaded successfully!';
+        a.href = url; a.download = 'aztec_output.pdf';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        out.textContent = 'PDF generated and downloaded!';
       } catch (err) {
+        clearLoading();
         out.textContent = 'Error: ' + err.message;
       }
     };

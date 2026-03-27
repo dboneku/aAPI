@@ -4,6 +4,7 @@ const PDFDocument = require('pdfkit');
 const path = require('path');
 const fs = require('fs');
 const { encode, decode } = require('../shared');
+const optimizer = require('./optimizer');
 
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
@@ -22,13 +23,34 @@ app.post('/preview', upload.single('file'), async (req, res) => {
   console.log('File detected:', req.file.originalname, 'Size:', req.file.size);
   try {
     const buf = req.file.buffer;
-    const result = await encode(buf, req.file.originalname);
-    // return base64 encoded symbols
-    const symbols = result.symbols.map(s => ({
-      index: s.index,
-      data: s.png.toString('base64')
-    }));
-    res.json({ symbolCount: result.meta.total, meta: result.meta, symbols });
+    const overrideCodecRaw = req.body && req.body.overrideCodec;
+    const overrideCodec = overrideCodecRaw !== undefined && overrideCodecRaw !== '' ? parseInt(overrideCodecRaw) : undefined;
+
+    // Always run full optimizer analysis (for UI strategy display)
+    const analysis = await optimizer.analyze(buf, req.file.originalname, req.file.mimetype);
+
+    // Apply override if requested
+    const encoded = overrideCodec !== undefined
+      ? optimizer.forceEncode(buf, overrideCodec)
+      : analysis.encoded;
+    const finalBuffer = overrideCodec !== undefined ? buf : analysis.buffer;
+    const finalFilename = overrideCodec !== undefined ? req.file.originalname : analysis.filename;
+
+    const result = await encode(finalBuffer, finalFilename, {
+      preEncoded: encoded,
+      originalSize: req.file.size
+    });
+    const symbols = result.symbols.map(s => ({ index: s.index, data: s.png.toString('base64') }));
+    res.json({
+      symbolCount: result.meta.total,
+      meta: result.meta,
+      symbols,
+      optimizer: {
+        label: analysis.label,
+        strategies: analysis.strategies,
+        isDiagramHint: analysis.isDiagramHint
+      }
+    });
   } catch (e) {
     console.error('Error in preview:', e);
     res.status(500).json({ error: e.message });
@@ -44,7 +66,17 @@ app.post('/encode', upload.single('file'), async (req, res) => {
   console.log('File detected:', req.file.originalname, 'Size:', req.file.size);
   try {
     const buf = req.file.buffer;
-    const result = await encode(buf, req.file.originalname);
+    const overrideCodecRaw = req.body && req.body.overrideCodec;
+    const overrideCodec = overrideCodecRaw !== undefined && overrideCodecRaw !== '' ? parseInt(overrideCodecRaw) : undefined;
+
+    const analysis = await optimizer.analyze(buf, req.file.originalname, req.file.mimetype);
+    const encoded = overrideCodec !== undefined
+      ? optimizer.forceEncode(buf, overrideCodec)
+      : analysis.encoded;
+    const finalBuffer = overrideCodec !== undefined ? buf : analysis.buffer;
+    const finalFilename = overrideCodec !== undefined ? req.file.originalname : analysis.filename;
+
+    const result = await encode(finalBuffer, finalFilename, { preEncoded: encoded, originalSize: req.file.size });
     const doc = new PDFDocument({ autoFirstPage: false });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'attachment; filename="aztec_output.pdf"');
@@ -63,7 +95,7 @@ app.post('/encode', upload.single('file'), async (req, res) => {
     // Title block
     doc.fontSize(16).font('Helvetica-Bold').text('AztecArchive Barcode Grid', margin, margin);
     const date = new Date().toISOString().split('T')[0];
-    const codecNames = { 0x00: 'RAW', 0x01: 'ZLIB', 0x02: 'BROTLI' };
+    const codecNames = { 0x00: 'RAW', 0x01: 'ZLIB', 0x02: 'DICT_ZLIB', 0x03: 'VECTOR' };
     const codec = codecNames[result.meta.compId] || 'UNKNOWN';
     doc.fontSize(10).font('Helvetica').text('File: ' + req.file.originalname, margin, margin + 20);
     doc.text('Date: ' + date, margin, margin + 35);
@@ -106,14 +138,15 @@ app.post('/decode', (req, res) => {
     const chunks = req.body.chunks.map(b64 => Buffer.from(b64, 'base64'));
     const result = decode(chunks);
     const mimeMap = {
-      'txt': 'text/plain',
-      'md': 'text/markdown',
-      'png': 'image/png',
-      'jpg': 'image/jpeg',
+      'txt':  'text/plain',
+      'md':   'text/markdown',
+      'svg':  'image/svg+xml',
+      'png':  'image/png',
+      'jpg':  'image/jpeg',
       'jpeg': 'image/jpeg',
-      'pdf': 'application/pdf',
-      'zip': 'application/zip',
-      'bin': 'application/octet-stream'
+      'pdf':  'application/pdf',
+      'zip':  'application/zip',
+      'bin':  'application/octet-stream'
     };
     res.json({
       data: result.data.toString('base64'),
@@ -130,3 +163,32 @@ app.post('/decode', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Encoder running on http://localhost:' + PORT));
+
+// ── /convert endpoint: SVG → PNG/JPEG rasterization via sharp ──────────────────
+app.post('/convert', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const targetFormat = (req.body && req.body.targetFormat || 'png').toLowerCase();
+  const dpi = parseInt((req.body && req.body.dpi) || '300') || 300;
+
+  let sharp;
+  try { sharp = require('sharp'); } catch (e) {
+    return res.status(501).json({ error: 'sharp is not installed. Run: npm install sharp' });
+  }
+  try {
+    let pipeline = sharp(req.file.buffer, { density: dpi });
+    if (targetFormat === 'jpeg' || targetFormat === 'jpg') {
+      pipeline = pipeline.jpeg({ quality: 90 });
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Content-Disposition', `attachment; filename="converted.jpg"`);
+    } else {
+      pipeline = pipeline.png();
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Content-Disposition', `attachment; filename="converted.png"`);
+    }
+    const output = await pipeline.toBuffer();
+    res.send(output);
+  } catch (e) {
+    console.error('Convert error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});

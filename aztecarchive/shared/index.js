@@ -2,15 +2,22 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { tryAll } = require('./compression');
+const { decodeDict } = require('./dict');
 const { extToTag, tagToExt } = require('./fileTypes');
 const { chunkBuffer } = require('./chunker');
 const { renderAztecPNG } = require('./aztec');
 const { crc16 } = require('./crc16');
 
-async function encode(buffer, filename) {
+/**
+ * encode(buffer, filename, opts)
+ *
+ * opts.preEncoded  { id, data }  — skip tryAll, use this pre-compressed result.
+ * opts.originalSize number       — use for compression ratio (defaults to buffer.length).
+ */
+async function encode(buffer, filename, opts = {}) {
   const ext = path.extname(filename || '').replace(/^\./, '').toLowerCase();
   const origTag = extToTag[ext] || 0xFF;
-  const best = tryAll(buffer);
+  const best = opts.preEncoded || tryAll(buffer, ext);
   const compId = best.id;
   const { chunks, warn } = chunkBuffer(best.data, origTag, origTag, compId);
   const symbols = [];
@@ -18,7 +25,8 @@ async function encode(buffer, filename) {
     const png = await renderAztecPNG(chunks[i]);
     symbols.push({ index: i, png });
   }
-  return { symbols, meta: { total: chunks.length, compId, warn, compressionRatio: ((1 - best.data.length / buffer.length) * 100).toFixed(1) + '%' } };
+  const originalSize = opts.originalSize != null ? opts.originalSize : buffer.length;
+  return { symbols, meta: { total: chunks.length, compId, warn, compressionRatio: ((1 - best.data.length / originalSize) * 100).toFixed(1) + '%' } };
 }
 
 // Decode expects array of Buffers (raw chunk payloads including 7-byte header)
@@ -65,8 +73,11 @@ function decode(chunks) {
     // ZLIB
     data = zlib.inflateSync(compressed);
   } else if (compId === 0x02) {
-    // BROTLI
-    data = zlib.brotliDecompressSync(compressed);
+    // DICT_ZLIB
+    data = decodeDict(compressed);
+  } else if (compId === 0x03) {
+    // VECTOR: zlib-deflated minified SVG — just inflate to get SVG text back
+    data = zlib.inflateSync(compressed);
   } else {
     throw new Error(`Unknown codec ID: 0x${compId.toString(16)}`);
   }
