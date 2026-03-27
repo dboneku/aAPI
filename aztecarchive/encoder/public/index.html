@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AztecEncoder | Analog APIs</title>
+  <link rel="stylesheet" href="style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <h1>AztecEncoder</h1>
+  
+  <div class="controls">
+    <input id="file" type="file" />
+    <button id="preview">Preview</button>
+    <button id="generate">Generate PDF</button>
+  </div>
+  
+  <div id="out"></div>
+  <div id="symbols"></div>
+  
+  <script>
+    const f = document.getElementById('file');
+    const out = document.getElementById('out');
+    const symbolsDiv = document.getElementById('symbols');
+    
+    document.getElementById('preview').onclick = async ()=>{
+      if(!f.files[0]) return alert('Choose a file first');
+      out.textContent = 'Processing preview...';
+      symbolsDiv.innerHTML = '';
+      try {
+        const fd = new FormData(); fd.append('file', f.files[0]);
+        console.log('Sending preview request for:', f.files[0].name);
+        const r = await fetch('/preview',{method:'POST', body:fd});
+        if (!r.ok) {
+          const errorText = await r.text();
+          console.error('Server returned error:', r.status, errorText);
+          out.textContent = `Error ${r.status}: ${errorText}`;
+          return;
+        }
+        const j = await r.json(); 
+        console.log('Preview result:', j);
+        out.textContent = `Symbol Count: ${j.symbolCount} | CompID: ${j.meta.compId}`;
+        
+        if (j.symbols) {
+          j.symbols.forEach(s => {
+            const card = document.createElement('div');
+            card.className = 'barcode-card';
+            
+            const img = document.createElement('img');
+            img.src = 'data:image/png;base64,' + s.data;
+            
+            const label = document.createElement('span');
+            label.textContent = `Symbol #${s.index + 1}`;
+            
+            card.appendChild(img);
+            card.appendChild(label);
+            symbolsDiv.appendChild(card);
+          });
+        }
+      } catch (err) {
+        console.error('Fetch error:', err);
+        out.textContent = 'Fetch error: ' + err.message;
+        alert('Error: ' + err.message);
+      }
+    };
+    
+    document.getElementById('generate').onclick = async ()=>{
+      if(!f.files[0]) return alert('Choose a file first');
+      out.innerHTML = 'Generating PDF...';
+      try {
+        const fd = new FormData(); fd.append('file', f.files[0]);
+        console.log('Sending encode request for:', f.files[0].name);
+        const r = await fetch('/encode',{method:'POST', body:fd});
+        if (!r.ok) {
+          const errorText = await r.text();
+          console.error('Server returned error:', r.status, errorText);
+          out.textContent = `Error ${r.status}: ${errorText}`;
+          return;
+        }
+        const blob = await r.blob();
+        console.log('Received blob, size:', blob.size);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'aztec_output.pdf';
+        
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        
+        out.innerHTML = `✅ PDF generated successfully. <br>The file should start downloading automatically. <br><a href="${url}" download="aztec_output.pdf">Click here to manually download</a> if it didn't start. <br><strong>Also saved to project root as aztec_output.pdf</strong>`;
+      } catch (err) {
+        console.error('Fetch error:', err);
+        out.textContent = 'Fetch error: ' + err.message;
+        alert('Error: ' + err.message);
+      }
+    };
+  </script>
+</body>
+</html>
